@@ -12,13 +12,14 @@ const int RST_PIN = D3;
 
 const int LOCK_BUTTON = A0;
 
-int lockStatus; // 1 is locked; 0 unlocked; 2 moving; -1 error
+const int SERVO_PIN = D1;
 
-bool authorized = false;
+const int lockedPosition = 105;
+const int unlockedPosition = 15;
+
+int lockStatus; // 1 is locked; 0 unlocked; -1 error
 
 Servo motor;
-
-int servoPos = 0;
 
 // set to SPI or I2C depending on how the header file is configured
 #if PN532_MODE == PN532_SPI_MODE
@@ -26,17 +27,6 @@ int servoPos = 0;
 #elif PN532_MODE == PN532_I2C_MODE
   Adafruit_PN532 nfc(IRQ_PIN, RST_PIN);
 #endif
-
-// TODO: get this working to check the iPhone's supplied UID
-int testCredentials(String input) {
-    if (input == "secret_key") {
-        authorized = true;
-        return 0;
-    } else {
-        authorized = false;
-        return -1;
-    }
-}
 
 // runs once at the start of each boot-up
 // 1. get serial port up and running
@@ -47,7 +37,7 @@ int testCredentials(String input) {
 // 6. set the status of the lock according to the servo's position
 void setup() {
     // 1
-    Serial.begin(115200);
+    Serial.begin(9600);
 
     // 2
     nfc.begin();
@@ -73,21 +63,28 @@ void setup() {
     // configure board to read RFID tags
     nfc.SAMConfig();
 
-    Serial.println("Waiting for an ISO14443A Card ...");
+    Serial.println("Ready for an ISO14443A Card.");
 
     // 3
     Particle.function("toggleLock", toggleLock);
     Particle.function("getStatus", getStatus);
     Particle.variable("lockStatus", lockStatus);
+    Particle.function("moveServo", moveServo);
 
     // 4
-    motor.attach(D0);
+    motor.attach(SERVO_PIN);
+    motor.write(unlockedPosition);
 
     // 5
     pinMode(LOCK_BUTTON, INPUT_PULLUP);
 
     // 6
-    lockStatus = getStatus("lock");
+    lockStatus = 0;
+}
+
+int moveServo(String input) {
+    motor.write(input.toInt());
+    return motor.read();
 }
 
 // check whether the hardware button is pressed
@@ -97,36 +94,41 @@ bool isButtonPressed() {
 
 // runs every 200ms to check for presence of NFC card
 void loop() {
-    delay(200);
-    Serial.print("lock status is: ");
-    Serial.println(lockStatus);
-    uint8_t success = 0;
-    uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
-    uint8_t uidLength = 0;                        // Length of the UID (4 or 7 bytes depending on ISO14443A card type)
-    success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, &uid[0], &uidLength);
+    // delay(500);
+    // Serial.print("lock status is: ");
+    // Serial.println(lockStatus);
 
-    if (success) {
-        // Display some basic information about the card
-        Serial.println("Found an ISO14443A card");
+    if (lockStatus == 1) {
+        Serial.print("Checking for card: ");
+        uint8_t success = 0;
+        uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
+        uint8_t uidLength = 0;                        // Length of the UID (4 or 7 bytes depending on ISO14443A card type)
+        success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, &uid[0], &uidLength);
+        Serial.println(success);
+        if (success) {
+            // Display some basic information about the card
+            Serial.println("Found an ISO14443A card");
 
-        if (uidLength == 4) { // found a legit card; print info and unlock
-            uint32_t cardid = uid[0];
-            cardid <<= 8;
-            cardid |= uid[1];
-            cardid <<= 8;
-            cardid |= uid[2];
-            cardid <<= 8;
-            cardid |= uid[3];
-            Serial.print("Mifare Classic card #");
-            Serial.println(cardid);
-            unlock();
+            if (uidLength == 4) { // found a legit card; print info and unlock
+                uint32_t cardid = uid[0];
+                cardid <<= 8;
+                cardid |= uid[1];
+                cardid <<= 8;
+                cardid |= uid[2];
+                cardid <<= 8;
+                cardid |= uid[3];
+                Serial.print("Mifare Classic card #");
+                Serial.println(cardid);
+                unlock();
+            }
+
+            Serial.println("");
         }
-
-        Serial.println("");
     }
-
-    if (isButtonPressed() && lockStatus != 1) { // door is unlocked and the buttons was pressed; lock it
-        lock();
+    else {
+        if (isButtonPressed()) { // door is unlocked and the button was pressed; lock it
+            lock();
+        }
     }
 }
 
@@ -135,15 +137,18 @@ void loop() {
 // returns the status
 int getStatus(String input) {
     int current = motor.read();
-    if (current < 10) {
+    Serial.print("motor read is ");
+    Serial.println(motor.read());
+    if (current > lockedPosition - 5) {
         lockStatus = 1;
-    } else if (current > 175) {
+    } else if (current < unlockedPosition + 5) {
         lockStatus = 0;
     } else {
         lockStatus = 2;
     }
+    Serial.print("result is: ");
+    Serial.println(lockStatus);
     return lockStatus;
-
 }
 
 // cloud function to toggle the state of the lock
@@ -151,28 +156,33 @@ int getStatus(String input) {
 int toggleLock(String input) {
     if (lockStatus == 0) {
         lock();
+        return 1;
     } else {
         unlock();
+        return 0;
     }
-    return getStatus("lock");
+    // return getStatus("lock");
 }
 
 // local function to lock the lock
 void lock() {
-    motor.write(5);
+    motor.write(lockedPosition);
     Serial.println("locking");
-    lockStatus = 2;
-    delay(1000);
-    getStatus("lock");
+    lockStatus = 1;
+    nfc.begin();
     nfc.SAMConfig();
+    // delay(500);
+    // getStatus("lock");
+    // nfc.begin();
+    // nfc.SAMConfig();
 }
 
 // local function to lock the lock
 void unlock() {
-    motor.write(180);
+    motor.write(unlockedPosition);
+    // nfc.SAMConfig();
     Serial.println("unlocking");
-    lockStatus = 2;
-    delay(1000);
-    getStatus("lock");
-    nfc.SAMConfig();
+    lockStatus = 0;
+    // delay(500);
+    // getStatus("lock");
 }
